@@ -49,6 +49,8 @@ module Xcov
           service_job_id: Xcov.config[:coveralls_service_job_id],
           service_name: Xcov.config[:coveralls_service_name],
           repo_token: Xcov.config[:coveralls_repo_token],
+          service_pull_request: Xcov.config[:coveralls_other][:pull_request_id],
+          commit_sha: Xcov.config[:coveralls_other][:commit_sha],
           source_files: source_files
         }
 
