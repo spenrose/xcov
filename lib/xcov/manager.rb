@@ -8,6 +8,7 @@ require 'xcov-core'
 require 'pathname'
 require 'json'
 require 'xcresult'
+require 'digest'
 
 module Xcov
   class Manager
@@ -87,6 +88,66 @@ module Xcov
       # Convert .xccoverage file to json
       ide_foundation_path = Xcov.config[:legacy_support] ? nil : Xcov.config[:ideFoundationPath]
       json_report = Xcov::Core::Parser.parse(xccoverage_files.first, Xcov.config[:output_directory], ide_foundation_path)
+
+      # This assumes only 1 xcresult file, can make more robust after finding proper place for this
+      tmp_dir = File.join(Xcov.config[:output_directory], 'tmp_lines')
+      FileUtils.mkdir(tmp_dir) unless File.directory?(tmp_dir)
+
+      jobs = [] # Array of { tempfile: , pid:}
+      json_report["targets"].each.with_index do |target, target_index|
+        target["files"].each.with_index do |file, file_index|
+          filepath = file['location']
+          filepath_hash = Digest::SHA2.hexdigest(filepath)
+          lines_output_path = File.join(tmp_dir, filepath_hash)
+
+          job_pid = fork do
+            `xcrun xccov view --archive --file "#{file['location']}" #{xcresults_to_parse_and_export.first} > #{lines_output_path}`
+          end
+
+          jobs << {
+            pid: job_pid,
+            filepath: filepath,
+            lines_output_path: lines_output_path,
+            # maybe have a path into json_report to not have to iterate it later
+            json_report_target_index: target_index,
+            json_report_file_index: file_index
+          }
+
+          if file_index % 10 == 0
+            sleep(1)
+          end
+        end
+      end
+
+      puts "JOB COUNT: #{jobs.count}"
+
+      # process all the jobs
+      jobs.each do |job|
+        Process.wait(job[:pid])
+        # puts "Job: #{job[:pid]} file: #{job[:filepath]}"
+
+        lines = []
+        File.readlines(job[:lines_output_path]).each do |line|
+          # This matches [Number]: [Number or *]
+          # First grouping is the entire match
+          # Second grouping is line number
+          # Third grouping is execution count (* means non-executable)
+          matches = line.match(/(\d+): ([*0-9]+)/)
+          if matches.nil?
+            # skip lines that look like (1, 2, 3)
+            next
+          end
+          lines << {
+            "executionCount" => matches[2].to_i, # Int
+            "executable" => matches[2] != "*",
+            "ranges" => nil
+          }
+        end
+        json_report["targets"][job[:json_report_target_index]]["files"][job[:json_report_file_index]]["lines"] = lines
+      end
+      # cleanup tempfiles
+      FileUtils.rm_rf(tmp_dir) if File.directory?(tmp_dir)
+
       ErrorHandler.handle_error("UnableToParseXccoverageFile") if json_report.nil?
 
       json_report
